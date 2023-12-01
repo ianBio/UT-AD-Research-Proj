@@ -223,3 +223,64 @@ confusionMatrix(rf_predict_fs_d, as.factor(test_fs$Dementia))
 confusionMatrix(rf_predict_ss_d, as.factor(test_ss$Dementia))
 confusionMatrix(rf_predict_fs_n, as.factor(test_nfs$Dementia))
 confusionMatrix(rf_predict_ss_n, as.factor(test_nss$Dementia))
+
+##MMSE Reference Data
+cross_data_0 <- read.csv('C:/R stoof/oasis_cross-sectional.csv', stringsAsFactors = F)
+cross_data_0 <- select(cross_data_0, -Hand, -Delay, -ASF, -Educ, -SES)
+
+cross_data_0$MMSE[is.na(cross_data_0$MMSE)] <- "30"
+cross_data_0$CDR[is.na(cross_data_0$CDR)] <- "0"
+
+cross_data_0$Dementia <- "N"
+#describe(cross_data)
+cross_data_0$Dementia[cross_data_0$CDR > 0] <- "D"
+cross_data_0 <- select(cross_data_0, -CDR)
+
+##Oasis Data RF prep
+oasis_data <- cross_data_0 %>%
+  select(M.F, Age, MMSE, nWBV, eTIV, Dementia) %>%
+  mutate(Dementia = as.factor(Dementia))
+
+n_train_oa <- round(0.7 * nrow(oasis_data)) #80% of length of main data set as integer
+train_indices_oa <- sample(1:nrow(oasis_data), n_train_oa) #creating a vector with random indices
+train_oa <- oasis_data[train_indices_oa, ] #generating train data set (with ideces = train_indices)
+test_oa <- oasis_data[-train_indices_oa, ] #generating test data set
+
+formula_oa <- Dementia ~ M.F + Age + eTIV + nWBV
+
+formula_MMSE <- Dementia ~ M.F + Age + MMSE + nWBV + eTIV
+
+
+##Model For OasisData
+model_rf_oa <- randomForest(formula_oa, data = train_oa, importance=TRUE)
+print(model_rf_oa)
+
+rf_predict_oa = predict(model_rf_oa, test_oa)
+sum (rf_predict_oa == test_oa$Dementia) /nrow(test_oa)
+
+confusionMatrix(rf_predict_oa, as.factor(test_oa$Dementia))
+
+plot(model_rf_oa, main = "Model Error by Number of Trees")
+legend(x = "right", 
+       legend = colnames(model_rf_oa$err.rate),
+       fill = 1:ncol(model_rf_oa$err.rate))
+
+varImpPlot(model_rf_oa, main = "Importance of Variables")
+
+
+#MMSE
+model_rf_oa_m <- randomForest(formula_MMSE, data = train_oa, importance=TRUE)
+print(model_rf_oa_m)
+
+rf_predict_oa_m = predict(model_rf_oa_m, test_oa)
+sum (rf_predict_oa_m == test_oa$Dementia) /nrow(test_oa)
+
+confusionMatrix(rf_predict_oa_m, as.factor(test_oa$Dementia))
+
+plot(model_rf_oa_m, main = "Model Error by Number of Trees")
+legend(x = "right", 
+       legend = colnames(model_rf_oa_m$err.rate),
+       fill = 1:ncol(model_rf_oa_m$err.rate))
+
+varImpPlot(model_rf_oa_m, main = "Importance of Variables")
+
