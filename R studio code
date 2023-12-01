@@ -1,0 +1,225 @@
+library(ggplot2)
+library(dplyr)
+library(Hmisc)
+library(PerformanceAnalytics)
+library(cowplot)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(e1071)
+library(randomForest)
+library(gbm)
+library(Metrics)
+library(vtreat)
+library(AUC)
+library(readr)
+set.seed(123)
+
+###importing OASIS Cross Sectional CSV data
+cross_data <- read.csv('C:/R stoof/oasis_cross-sectional.csv', stringsAsFactors = F)
+#Free surfer Volume segment Data
+cross_fs <- read.csv('C:/R stoof/test_5_prep.table.csv', stringsAsFactors = F)
+#Removing unnecessary variables
+cross_data <- select(cross_data, -Hand, -Delay, -ASF, -SES, -Educ)
+#Replacing Na values with perfect scores since some missing values are present in people under 60
+cross_data$MMSE[is.na(cross_data$MMSE)] <- "30"
+cross_data$CDR[is.na(cross_data$CDR)] <- "0"
+#I am changing CDR to demented.
+cross_data$Dementia <- "N"
+cross_data$Dementia[cross_data$CDR > 0] <- "D"
+cross_data <- select(cross_data, -CDR)
+
+#Can merge by using the Subject ID on the FreeSurfer data, and appending columns 
+#accociated with the same subject ID in the demographic Data
+cross_merge <- merge(cross_data,cross_fs, by.x = "ID",by.y="Measure.volume")
+
+###Importing Synthsegmentation Data.
+subject_names <- list.files(path="C:/Users/Ian's Special Potato/Documents/synth_volumes")
+subject_names <- gsub(".csv","",subject_names)
+
+#Merging all csv files from synthseg into one.
+synth_data <- list.files(path = "C:/Users/Ian's Special Potato/Documents/synth_volumes",
+                         pattern = "*.csv", full.names = TRUE) %>% 
+  lapply(read_csv) %>%                                             
+  bind_rows                                                        
+#Adding the ID's to dataframe
+synth_data$ID <- subject_names
+synth_data <- select(synth_data, -1)
+
+##Merging The synth segmentation data with the demographic data from cross_sectional CSV file
+synth_merge <- merge(cross_data, synth_data, by.x ="ID", by.y="ID")
+
+#Need to make dementia a factor.
+cross_merge <- cross_merge %>%
+  mutate(Dementia = as.factor(Dementia))
+
+synth_merge <- synth_merge %>%
+  mutate(Dementia = as.factor(Dementia))
+
+#change the names of the collumns to be the same as that of the freesurfer data
+names(synth_merge)[names(synth_merge) == "total intracranial"] <- "IntraCranialVol"
+names(synth_merge)[names(synth_merge) == "right hippocampus"] <- "Right.Hippocampus"
+names(synth_merge)[names(synth_merge) == "left hippocampus"] <- "Left.Hippocampus"
+names(synth_merge)[names(synth_merge) == "right inferior lateral ventricle"] <- "Right.Inf.Lat.Vent"
+names(synth_merge)[names(synth_merge) == "left inferior lateral ventricle"] <- "Left.Inf.Lat.Vent"
+names(synth_merge)[names(synth_merge) == "left lateral ventricle"] <- "Left.Lateral.Ventricle"
+names(synth_merge)[names(synth_merge) == "right lateral ventricle"] <- "Right.Lateral.Ventricle"
+names(synth_merge)[names(synth_merge) == "right amygdala"] <- "Right.Amygdala"
+names(synth_merge)[names(synth_merge) == "left amygdala"] <- "Left.Amygdala"
+names(synth_merge)[names(synth_merge) == "4th ventricle"] <- "X4th.Ventricle"
+names(synth_merge)[names(synth_merge) == "3rd ventricle"] <- "X3rd.Ventricle"
+
+###ICV Normalization of Brain Segments
+fs_ICV_mean <- mean(cross_merge$IntraCranialVol)
+ss_ICV_mean <- mean(synth_merge$IntraCranialVol)
+##Make seperate dataframe called normalized_fs and ss
+normal_fs <- cross_merge
+normal_ss <- synth_merge
+brain_segs <- c('Right.Hippocampus', 'Left.Hippocampus', 'Left.Inf.Lat.Vent', 'Right.Inf.Lat.Vent', 
+                'Left.Lateral.Ventricle', 'Right.Lateral.Ventricle', 'X3rd.Ventricle', 'X4th.Ventricle', 
+                'Left.Amygdala', 'Right.Amygdala')
+##For loop for normalized fs data
+for (j in 1:length(brain_segs)){
+  #Linear Regression between Region of Interest (brain seg) and ICV as independent
+  cross_lm <- lm(cross_merge[,brain_segs[j]] ~ IntraCranialVol, data = cross_merge)
+  
+  for(i in 1:length(cross_merge[,1])) {
+    #Doing new value calculation 
+    normal_fs[i,brain_segs[j]] <- (cross_merge[i,brain_segs[j]] - (summary(cross_lm)$coefficients["IntraCranialVol","Estimate"]*
+                                                                     (cross_merge[i,"IntraCranialVol"] - fs_ICV_mean)) %/% 1)
+  }
+}
+##For loop for normalized SS data
+for (j in 1:length(brain_segs)){
+  synth_lm <- lm(synth_merge[,brain_segs[j]] ~ IntraCranialVol, data = synth_merge)
+  for(i in 1:length(synth_merge[,1])) {
+    normal_ss[i,brain_segs[j]] <- (synth_merge[i,brain_segs[j]] - (summary(synth_lm)$coefficients["IntraCranialVol","Estimate"]*
+                                                                     (synth_merge[i,"IntraCranialVol"] - ss_ICV_mean)) %/% 1)
+  }
+}
+
+#Formulas
+formula_mm <- Dementia ~ M.F + Age + MMSE + nWBV + IntraCranialVol + Right.Hippocampus +
+  Left.Hippocampus + Left.Inf.Lat.Vent + Right.Inf.Lat.Vent + Left.Lateral.Ventricle + 
+  Right.Lateral.Ventricle + X3rd.Ventricle + X4th.Ventricle +
+  Left.Amygdala + Right.Amygdala
+formula_d <- Dementia ~ M.F + Age + nWBV + IntraCranialVol + Right.Hippocampus +
+  Left.Hippocampus + Left.Inf.Lat.Vent + Right.Inf.Lat.Vent + Left.Lateral.Ventricle + 
+  Right.Lateral.Ventricle + X3rd.Ventricle + X4th.Ventricle +
+  Left.Amygdala + Right.Amygdala
+
+#Split into training and testing set for Freesurfer data
+n_train <- round(0.7 * nrow(cross_merge)) #70% of length of main data set as integer
+train_indices <- sample(1:nrow(cross_merge), n_train) #creating a vector with random indices
+train_fs <- cross_merge[train_indices, ] #generating train data set (with ideces = train_indices)
+test_fs <- cross_merge[-train_indices, ] #generating test data set
+
+#Split into training and testing for Synthsegmentation Data
+ss_train <- round(0.7 * nrow(synth_merge)) 
+train_indices_ss <- sample(1:nrow(synth_merge),ss_train) 
+train_ss <- synth_merge[train_indices_ss, ] 
+test_ss <- synth_merge[-train_indices_ss, ] 
+
+##Forrest Model with FS data and MMSE
+rf_fs <- randomForest(formula = formula_mm, data = train_fs, importance=TRUE)
+print(rf_fs)
+rf_predict_fs = predict(rf_fs, test_fs)
+confusionMatrix(rf_predict_fs, as.factor(test_fs$Dementia))
+plot(rf_fs, main = "Model Error by Number of Trees")
+legend(x = "right", 
+       legend = colnames(rf_fs$err.rate),
+       fill = 1:ncol(rf_fs$err.rate))
+
+varImpPlot(rf_fs, main = "Importance of Variables FS W/MMSE")
+
+##RF with SS data and MMSE
+rf_ss <- randomForest(formula = formula_mm, data = train_ss, importance=TRUE)
+print(rf_ss)
+rf_predict_ss = predict(rf_ss, test_ss)
+
+confusionMatrix(rf_predict_ss, as.factor(test_ss$Dementia))
+plot(rf_ss, main = "Model Error by Number of Trees")
+legend(x = "right", 
+       legend = colnames(rf_ss$err.rate),
+       fill = 1:ncol(rf_ss$err.rate))
+
+varImpPlot(rf_ss, main = "Importance of Variables SS W/MMSE")
+
+#TREE MODELS (FS) W/O MMSE
+rf_fs_d <- randomForest(formula = formula_d, data = train_fs, importance=TRUE)
+print(rf_fs_d)
+rf_predict_fs_d = predict(rf_fs_d, test_fs)
+
+confusionMatrix(rf_predict_fs_d, as.factor(test_fs$Dementia))
+plot(rf_fs_d, main = "Model Error by Number of Trees")
+legend(x = "topright", 
+       legend = colnames(rf_fs_d$err.rate),
+       fill = 1:ncol(rf_fs_d$err.rate))
+varImpPlot(rf_fs_d, main = "Importance of Variables FS")
+
+#SS w/o mmse
+rf_ss_d <- randomForest(formula = formula_d, data = train_ss, importance=TRUE)
+print(rf_ss_d)
+rf_predict_ss_d = predict(rf_ss_d, test_ss)
+
+confusionMatrix(rf_predict_ss_d, as.factor(test_ss$Dementia))
+plot(rf_ss_d, main = "Model Error by Number of Trees")
+legend(x = "right", 
+       legend = colnames(rf_ss_d$err.rate),
+       fill = 1:ncol(rf_ss_d$err.rate))
+
+varImpPlot(rf_ss_d, main = "Importance of Variables SS")
+
+###Training and Trees for Normalized Data (just using without MMSE)
+nfs_train <- round(0.7 * nrow(normal_fs)) 
+train_indices_nfs <- sample(1:nrow(normal_fs),nfs_train) 
+train_nfs <- normal_fs[train_indices_nfs, ] 
+test_nfs <- normal_fs[-train_indices_nfs, ] 
+
+nss_train <- round(0.7 * nrow(normal_ss)) 
+train_indices_nss <- sample(1:nrow(normal_ss),nss_train)
+train_nss <- normal_ss[train_indices_nss, ] 
+test_nss <- normal_ss[-train_indices_nss, ]
+
+#Trees for normalized fs data
+rf_fs_n <- randomForest(formula = formula_d, data = train_nfs, importance=TRUE)
+print(rf_fs_n)
+rf_predict_fs_n = predict(rf_fs_n, test_nfs)
+
+confusionMatrix(rf_predict_fs_n, as.factor(test_nfs$Dementia))
+
+plot(rf_fs_n, main = "Model Error by Number of Trees")
+legend(x = "right", 
+       legend = colnames(rf_fs_n$err.rate),
+       fill = 1:ncol(rf_fs_n$err.rate))
+varImpPlot(rf_fs_n, main = "Importance of Variables NFS")
+
+#Tree for noramlized ss data
+rf_ss_n <- randomForest(formula = formula_d, data = train_nss, importance=TRUE)
+print(rf_ss_n)
+rf_predict_ss_n = predict(rf_ss_n, test_nss)
+
+confusionMatrix(rf_predict_ss_n, as.factor(test_nss$Dementia))
+plot(rf_ss_n, main = "Model Error by Number of Trees")
+legend(x = "right", 
+       legend = colnames(rf_ss_n$err.rate),
+       fill = 1:ncol(rf_ss_n$err.rate))
+
+varImpPlot(rf_ss_n, main = "Importance of Variables NSS")
+
+
+
+###Quick Commands for Summary Of Data
+print(rf_fs)
+print(rf_ss)
+print(rf_fs_d)
+print(rf_ss_d)
+print(rf_fs_n)
+print(rf_ss_n)
+
+confusionMatrix(rf_predict_fs, as.factor(test_fs$Dementia))
+confusionMatrix(rf_predict_ss, as.factor(test_ss$Dementia))
+confusionMatrix(rf_predict_fs_d, as.factor(test_fs$Dementia))
+confusionMatrix(rf_predict_ss_d, as.factor(test_ss$Dementia))
+confusionMatrix(rf_predict_fs_n, as.factor(test_nfs$Dementia))
+confusionMatrix(rf_predict_ss_n, as.factor(test_nss$Dementia))
